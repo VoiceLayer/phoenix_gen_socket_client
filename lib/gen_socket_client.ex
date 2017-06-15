@@ -173,7 +173,7 @@ defmodule Phoenix.Channels.GenSocketClient do
     cond do
       # first message on a channel must always be a join
       event != "phx_join" and ref == 1 ->
-        :ets.delete(transport.message_refs, topic)
+        :ets.delete(transport.message_refs, {self(), topic})
         {:error, :not_joined}
       # join must always be a first message
       event == "phx_join" and ref > 1 ->
@@ -218,6 +218,9 @@ defmodule Phoenix.Channels.GenSocketClient do
   def init({callback, transport_mod, arg, socket_opts}) do
     case callback.init(arg) do
       {action, url, callback_state} when action in [:connect, :noconnect] ->
+        if :ets.info(:gen_socket_client_message_refs) == :undefined do
+          :ets.new(:gen_socket_client_message_refs, [:public, :set, :named_table])
+        end
         {:ok,
           maybe_connect(action, %{
             url: url,
@@ -228,7 +231,7 @@ defmodule Phoenix.Channels.GenSocketClient do
             callback_state: callback_state,
             transport_pid: nil,
             transport_mref: nil,
-            message_refs: :ets.new(:message_refs, [:private, :set])
+            message_refs: :gen_socket_client_message_refs
           })
         }
       other -> other
@@ -287,7 +290,7 @@ defmodule Phoenix.Channels.GenSocketClient do
       "ok" ->
         invoke_callback(state, :handle_joined, [topic, payload["response"], transport(state)])
       "error" ->
-        :ets.delete(state.message_refs, topic)
+        :ets.delete(state.message_refs, {self(), topic})
         invoke_callback(state, :handle_join_error, [topic, payload["response"], transport(state)])
     end
   end
@@ -298,7 +301,7 @@ defmodule Phoenix.Channels.GenSocketClient do
   # channel has been closed (phx_close) or crashed (phx_error) on the server
   defp handle_message(%{event: event, payload: payload, topic: topic}, state)
       when event in ["phx_close", "phx_error"] do
-    :ets.delete(state.message_refs, topic)
+    :ets.delete(state.message_refs, {self(), topic})
     invoke_callback(state, :handle_channel_closed, [topic, payload, transport(state)])
   end
   # other messages from the server
@@ -321,6 +324,7 @@ defmodule Phoenix.Channels.GenSocketClient do
   end
 
   defp reinit(state) do
+    # todo: match_delete
     :ets.delete_all_objects(state.message_refs)
     if (state.transport_mref != nil), do: Process.demonitor(state.transport_mref, [:flush])
     %{state | transport_pid: nil, transport_mref: nil}
@@ -330,7 +334,7 @@ defmodule Phoenix.Channels.GenSocketClient do
     do: Map.take(state, [:transport_mod, :transport_pid, :message_refs, :serializer])
 
   defp next_ref(topic, message_refs),
-    do: :ets.update_counter(message_refs, topic, 1, {topic, 0})
+    do: :ets.update_counter(message_refs, {self(), topic}, 1, {topic, 0})
 
   defp invoke_callback(state, function, args) do
     callback_response = apply(state.callback, function, args ++ [state.callback_state])
